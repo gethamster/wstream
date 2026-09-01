@@ -1,6 +1,6 @@
 /* wstream — engine-agnostic NVMe->memory weight residency streaming.
  *
- * One low-level primitive both pMLX and mlx-serve (or any engine) can link:
+ * One low-level primitive any inference engine can link:
  * mmap-free row streaming off SSD with a pinned-resident prefix + a pread
  * thread-pool for the tail. No MLX, no Python, no C++ — plain C, caller owns
  * the destination buffer (so on Apple unified memory it drops straight into an

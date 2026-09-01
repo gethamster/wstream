@@ -14,7 +14,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define ROW_BYTES 160u        /* mirrors the pMLX n-gram row width */
+#define ROW_BYTES 160u        /* a small, realistic embedding-row width */
 #define N_ROWS    100000u
 #define RESIDENT  40000u      /* 40% wired, 60% streamed */
 

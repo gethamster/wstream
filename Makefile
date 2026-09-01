@@ -4,7 +4,7 @@ CFLAGS ?= -O2 -Wall -Wextra -std=c11 -pthread
 libwstream.a: wstream.o
 	ar rcs $@ $<
 
-# Shared library for ctypes/FFI consumers (pMLX binds this).
+# Shared library for ctypes/FFI consumers.
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 DYLIB := libwstream.dylib
