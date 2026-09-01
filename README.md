@@ -7,7 +7,7 @@ re-implementing the plumbing.
 
 ## What it is (and isn't)
 
-- Plain C. No MLX, no Python, no C++. ~230 LOC.
+- Plain C, POSIX (Linux + macOS). No MLX, no Python, no C++. ~220 LOC.
 - A file is `n_rows` fixed-size rows. The first `resident_rows` are read once and
   wired (`mlock`); the rest stream on demand through a `pread` thread-pool.
 - **pread pool, not mmap page-faults** — the fault path costs ~5 ms/first-touch;
@@ -15,12 +15,18 @@ re-implementing the plumbing.
 - Caller owns the destination buffer. On Apple unified memory that buffer is
   already device-addressable, so `ws_gather` writes straight into an MLX
   `bytesNoCopy` buffer or a Zig slice — no copy, no framework coupling.
+- **Reentrant.** Concurrent `ws_gather` calls on the same handle are safe — each
+  carries its own completion latch — so a multi-threaded decode loop can share
+  one `wstream`. (`ws_close` must not race a live gather.)
+- **Fails loud.** `ws_open` rejects a file shorter than `n_rows*row_bytes` or a
+  failed resident load; `ws_gather` returns `-1` on an out-of-range index or a
+  short read instead of handing back a silent zero/partial row.
 
 ## API
 
 ```c
-wstream *ws_open(path, row_bytes, n_rows, resident_rows, threads);
-int      ws_gather(ws, indices, count, dst);   // resident=copy, tail=pread pool
+wstream *ws_open(path, row_bytes, n_rows, resident_rows, threads);  // NULL on error
+int      ws_gather(ws, indices, count, dst);   // 0 ok, -1 bad index / short read
 void     ws_prefetch(ws, indices, count);      // F_RDADVISE hint, non-blocking
 int      ws_resident(ws, index);               // zero-IO row?
 void     ws_close(ws);

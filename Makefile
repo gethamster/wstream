@@ -11,7 +11,13 @@ test: test_wstream.c wstream.o
 	$(CC) $(CFLAGS) -o test_wstream test_wstream.c wstream.o
 	./test_wstream
 
+PREFIX ?= /usr/local
+install: libwstream.a wstream.h
+	install -d $(DESTDIR)$(PREFIX)/lib $(DESTDIR)$(PREFIX)/include
+	install -m 644 libwstream.a $(DESTDIR)$(PREFIX)/lib/
+	install -m 644 wstream.h $(DESTDIR)$(PREFIX)/include/
+
 clean:
 	rm -f wstream.o libwstream.a test_wstream
 
-.PHONY: test clean
+.PHONY: test install clean
