@@ -35,6 +35,40 @@ int      ws_resident(ws, index);               // zero-IO row?
 void     ws_close(ws);
 ```
 
+## Using it in your engine
+
+wstream is a single `.c` + `.h`, so add it whichever way fits your build:
+
+**Vendor the source** (simplest — recommended): copy `wstream.c` and `wstream.h`
+into your project and compile them with the rest of your code. No dependency, no
+install step.
+
+**Or install a linkable library:**
+
+```
+make install                 # -> /usr/local/lib/libwstream.a  +  /usr/local/include/wstream.h
+cc yourcode.c -lwstream      # then link it
+```
+
+Either way the interface is just the header:
+
+```c
+#include "wstream.h"
+
+wstream *ws = ws_open("weights.bin", row_bytes, n_rows, resident_rows, /*threads=*/8);
+uint32_t idx[16] = { /* the rows you need this step */ };
+ws_gather(ws, idx, 16, dst);   // dst is YOURS: count * row_bytes, caller-owned
+ws_close(ws);
+```
+
+`dst` is caller-owned, so on Apple unified memory you point it straight at an MLX
+`bytesNoCopy` buffer or a Zig/C slice — wstream never allocates your weights, so
+there's no framework coupling.
+
+**From a non-C language (Python, etc.):** build the shared lib with `make dylib`
+(→ `libwstream.dylib` / `.so`) and `dlopen` it from your FFI. pmlx ships a ~40-line
+ctypes binding (`pmlx/io/wstream.py`) you can copy as a starting point.
+
 ## Build
 
 ```
