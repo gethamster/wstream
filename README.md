@@ -10,8 +10,11 @@ re-implementing the plumbing.
 - Plain C, POSIX (Linux + macOS). No MLX, no Python, no C++. ~220 LOC.
 - A file is `n_rows` fixed-size rows. The first `resident_rows` are read once and
   wired (`mlock`); the rest stream on demand through a `pread` thread-pool.
-- **pread pool, not mmap page-faults** — the fault path costs ~5 ms/first-touch;
-  a real read-ahead pool is ~0.7 ms (measured on this class of workload).
+- **pread pool, not mmap page-faults** — on a cold cache the mmap fault path
+  serializes one synchronous first-touch per row, while the pool issues the
+  reads in parallel. Warm, the two are comparable (mmap even wins — no pool
+  overhead); the win is on the cold first touch. Reproduce on your hardware with
+  `make bench` (drop caches first: `sudo purge` on macOS).
 - Caller owns the destination buffer. On Apple unified memory that buffer is
   already device-addressable, so `ws_gather` writes straight into an MLX
   `bytesNoCopy` buffer or a Zig slice — no copy, no framework coupling.
@@ -35,7 +38,8 @@ void     ws_close(ws);
 ## Build
 
 ```
-make test     # compiles + runs the byte-exact correctness test
+make test     # compiles + runs the byte-exact / reentrancy correctness test
+make bench     # pread-pool vs mmap first-touch latency (see cold-cache note above)
 ```
 
 ## Scope / co-design notes
