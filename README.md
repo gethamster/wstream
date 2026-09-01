@@ -5,6 +5,8 @@ The reusable primitive under "stream experts / n-gram tables off SSD" — pulled
 out so any engine (pMLX, mlx-serve, …) links the same thing instead of each
 re-implementing the plumbing.
 
+Released by **Hamster Research** — [tryhamster.com/research](https://tryhamster.com/research) · [tryhamster.com](https://tryhamster.com)
+
 ## What it is (and isn't)
 
 - Plain C, POSIX (Linux + macOS). No MLX, no Python, no C++. ~220 LOC.
