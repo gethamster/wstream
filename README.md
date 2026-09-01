@@ -2,135 +2,138 @@
 
 [![ci](https://github.com/gethamster/wstream/actions/workflows/ci.yml/badge.svg)](https://github.com/gethamster/wstream/actions/workflows/ci.yml)
 
-A tiny, engine-agnostic C library for NVMe→memory weight residency streaming.
-The reusable primitive under "stream experts / n-gram tables off SSD" — pulled
-out so any engine (pMLX, mlx-serve, …) links the same thing instead of each
-re-implementing the plumbing.
+A small C library that streams fixed-size rows from an SSD-resident file into
+memory you own, with a pinned hot prefix and a `pread` thread pool for the
+rest. Built for inference engines that keep large weight tables, such as MoE
+experts or n-gram embeddings, on disk.
 
-Released by **Hamster Research** — [tryhamster.com/research](https://tryhamster.com/research) · [tryhamster.com](https://tryhamster.com)
+Released by [Hamster Research](https://tryhamster.com/research) · [tryhamster.com](https://tryhamster.com)
 
-## What it is (and isn't)
+## How it works
 
-- Plain C11, POSIX (Linux + macOS). No MLX, no Python, no dependencies. Under
-  300 lines. `extern "C"` guarded, so C++ engines link it directly.
-- A file is `n_rows` fixed-size rows. The first `resident_rows` are read once and
-  wired (`mlock`); the rest stream on demand through a `pread` thread-pool.
-- **pread pool, not mmap page-faults** — on a cold cache the mmap fault path
-  serializes one synchronous first-touch per row, while the pool issues the
-  reads in parallel. Warm, the two are comparable (mmap even wins — no pool
-  overhead); the win is on the cold first touch. Reproduce on your hardware with
-  `make bench` (drop caches first: `sudo purge` on macOS).
-- Caller owns the destination buffer. On Apple unified memory that buffer is
-  already device-addressable, so `ws_gather` writes straight into an MLX
-  `bytesNoCopy` buffer or a Zig slice — no copy, no framework coupling.
-- **Reentrant.** Concurrent `ws_gather` calls on the same handle are safe — each
-  carries its own completion latch — so a multi-threaded decode loop can share
-  one `wstream`. (`ws_close` must not race a live gather.)
-- **Fails loud.** `ws_open` rejects a file shorter than `n_rows*row_bytes` or a
-  failed resident load; `ws_gather` returns `-1` on an out-of-range index or a
-  short read instead of handing back a silent zero/partial row. Reads retry on
-  `EINTR`, so a signal in the host process never fails a gather.
-- **CI** runs the byte-exact + reentrancy test on Linux and macOS, plus
-  ThreadSanitizer, ASan/UBSan, and a `-pedantic -Werror` build.
+The file is `n_rows` rows of `row_bytes` each.
 
-## When it helps (and when it doesn't)
+- The first `resident_rows` rows are read once at open and pinned with `mlock`,
+  so gathering them is a memcpy with no IO.
+- Every other row is fetched on demand by `threads` workers issuing `pread` in
+  parallel.
+- `ws_gather` writes rows straight into a buffer you own. On Apple unified
+  memory that buffer can be device-visible, so there is no extra copy.
 
-Be clear-eyed about what this buys you.
+mmap takes one synchronous page fault per row. The pool issues every read in a
+gather at once, so on a cold cache sixteen serial faults of several milliseconds each
+become one parallel round trip.
 
-**Warm cache: roughly nothing.** If the table fits in RAM, the OS page cache
-already serves it fast. In pMLX the disk-PLE gather is ~1% of a decode step
-warm, and switching it to wstream measured neutral end-to-end (+0.6%, CI
-includes zero). Making the pool faster can't move that number, so don't reach
-for wstream expecting a warm tokens/sec win.
+## Install
 
-**Cold cache / memory pressure: this is the whole point.** The moment
-model + table exceeds RAM, the page cache thrashes and every mmap lookup
-becomes a serial cold page-fault, ~5 ms each. Sixteen rows per token is
-~80 ms of stalls, several times a whole decode step, and the disk-resident
-config becomes unusable. wstream collapses those sixteen serial faults into
-one parallel round trip, and a wired `resident_rows` prefix makes the hot
-rows zero-IO even when everything else is cold.
+One `.c` and one `.h`, no dependencies. C11, POSIX, Linux and macOS.
 
-So wstream is a **capability lever, not a speed lever**: it lets you run a
-disk-resident table, a bigger model, or streamed MoE experts on hardware that
-could not otherwise hold them. Size it by the regime you actually run in,
-and measure cold (`make bench` after dropping caches) before deciding.
+Vendor it (recommended): copy `wstream.c` and `wstream.h` into your tree and
+compile them with your code.
 
-To get the most out of it:
-
-- **Order rows hot-first.** Row access is usually Zipfian. Lay the file out so
-  the most-hit rows come first and set `resident_rows` to cover them; those
-  lookups never touch disk. This is a file-layout convention, not a feature.
-- **Batch.** One `ws_gather` of many rows amortizes better than many small
-  ones (per-row cost roughly halves from 8 to 128 rows/gather). Gather a whole
-  speculative draft tree in one call.
-- **Prefetch predictable keys.** `ws_prefetch` is a non-blocking readahead
-  hint with no pool occupancy. Use it for rows you know you'll need next step
-  instead of reading and discarding them to warm the cache.
-- **Size threads to rows/gather.** More workers than rows just adds wakeup
-  overhead; ~4 threads for a 16-row gather, re-sweep if you batch bigger.
-
-## API
-
-```c
-wstream *ws_open(path, row_bytes, n_rows, resident_rows, threads);  // NULL on error
-int      ws_gather(ws, indices, count, dst);   // 0 ok, -1 bad index / short read
-void     ws_prefetch(ws, indices, count);      // readahead hint (F_RDADVISE / fadvise)
-int      ws_resident(ws, index);               // zero-IO row?
-void     ws_close(ws);
-```
-
-## Using it in your engine
-
-wstream is a single `.c` + `.h`, so add it whichever way fits your build:
-
-**Vendor the source** (simplest — recommended): copy `wstream.c` and `wstream.h`
-into your project and compile them with the rest of your code. No dependency, no
-install step.
-
-**Or install a linkable library:**
+Or install a static library:
 
 ```
-make install                 # -> /usr/local/lib/libwstream.a  +  /usr/local/include/wstream.h
-cc yourcode.c -lwstream      # then link it
+make install                 # libwstream.a + wstream.h into /usr/local
+cc yourcode.c -lwstream
 ```
 
-Either way the interface is just the header:
+Or build a shared library for FFI from Python, Zig, or anything with `dlopen`:
+
+```
+make dylib                   # libwstream.dylib on macOS, libwstream.so on Linux
+```
+
+The header has `extern "C"` guards, so C++ projects link it directly.
+
+## Quick start
 
 ```c
 #include "wstream.h"
 
-wstream *ws = ws_open("weights.bin", row_bytes, n_rows, resident_rows, /*threads=*/8);
-uint32_t idx[16] = { /* the rows you need this step */ };
-ws_gather(ws, idx, 16, dst);   // dst is YOURS: count * row_bytes, caller-owned
+wstream *ws = ws_open("table.bin", row_bytes, n_rows, resident_rows, /*threads=*/4);
+if (!ws) { /* missing or short file, or allocation failure */ }
+
+uint32_t idx[16] = { /* row indices for this step */ };
+unsigned char *dst = your_buffer;            /* 16 * row_bytes bytes, caller-owned */
+
+ws_prefetch(ws, next_idx, 16);               /* optional readahead hint for next step */
+if (ws_gather(ws, idx, 16, dst) != 0) { /* out-of-range index or short read */ }
+
 ws_close(ws);
 ```
 
-`dst` is caller-owned, so on Apple unified memory you point it straight at an MLX
-`bytesNoCopy` buffer or a Zig/C slice — wstream never allocates your weights, so
-there's no framework coupling.
+## API
 
-**From a non-C language (Python, etc.):** build the shared lib with `make dylib`
-(→ `libwstream.dylib` / `.so`) and `dlopen` it from your FFI. pmlx ships a ~40-line
-ctypes binding (`pmlx/io/wstream.py`) you can copy as a starting point.
+| Function | What it does |
+|---|---|
+| `ws_open(path, row_bytes, n_rows, resident_rows, threads)` | Opens the file, pins the first `resident_rows`, starts `threads` workers (0 means 4). Returns `NULL` if the file is missing or shorter than `n_rows * row_bytes`, the resident load fails, or an allocation fails. |
+| `ws_gather(ws, indices, count, dst)` | Copies `count` rows into `dst` (`count * row_bytes` bytes). Resident rows are memcpy'd, the rest are read in parallel. Blocks until done. Returns 0, or -1 on an out-of-range index or short read, in which case `dst` is undefined. |
+| `ws_prefetch(ws, indices, count)` | Non-blocking readahead hint for non-resident rows. `F_RDADVISE` on macOS, `posix_fadvise` on Linux. |
+| `ws_resident(ws, index)` | Returns 1 if the row is in the pinned prefix. |
+| `ws_close(ws)` | Stops the pool and frees everything. Must not overlap a running gather. |
 
-## Build
+Guarantees:
+
+- Concurrent `ws_gather` calls on one handle are safe, since each call carries
+  its own completion latch.
+- Reads retry on `EINTR`, so a signal in the host process does not fail a
+  gather.
+- No silent partial rows. Every failure comes back through the return value.
+
+## When it helps
+
+wstream is for tables that do not fit in RAM.
+
+| Regime | mmap | wstream |
+|---|---|---|
+| Table fits in RAM (warm page cache) | Fast, no pool overhead | About the same |
+| Table larger than RAM (cold faults) | One multi-millisecond fault per row, serialized | One parallel round trip per gather; pinned rows need no IO |
+
+If your table fits in memory, mmap is fine and wstream will not make decode
+faster. If it does not fit, mmap stalls on every lookup, and wstream makes the
+disk-resident configuration usable.
+
+Measure cold before deciding. `make bench` compares both paths on your
+hardware. Drop caches first (`sudo purge` on macOS, `echo 3 >
+/proc/sys/vm/drop_caches` on Linux), otherwise you are measuring RAM.
+
+## Getting the most out of it
+
+- Order rows hot-first. Access is usually skewed, so put the most-hit rows at
+  the front of the file and set `resident_rows` to cover them. Those lookups
+  never touch disk.
+- Batch. One gather of many rows costs less per row than many small gathers;
+  per-row cost drops by about a third between 8 and 128 rows per call. Gather a whole
+  speculative draft tree at once.
+- Prefetch predictable rows. `ws_prefetch` costs nothing on the pool. Use it
+  for rows you know you will need next step instead of reading and discarding
+  them to warm the cache.
+- Match threads to rows per gather. More workers than rows adds wakeup
+  overhead. Four threads suit a 16-row gather; re-sweep if you batch larger.
+
+## Build and test
 
 ```
-make test     # compiles + runs the byte-exact / reentrancy correctness test
-make bench     # pread-pool vs mmap first-touch latency (see cold-cache note above)
+make test      # byte-exact, out-of-range, and 1600-gather concurrency test
+make bench     # pread pool vs mmap first-touch latency
+make dylib     # shared library
+make install   # static library and header into $(PREFIX), default /usr/local
 ```
 
-## Scope / co-design notes
+CI runs the test on Linux and macOS, plus ThreadSanitizer, ASan/UBSan, and a
+`-pedantic -Werror` build.
 
-v0 skeleton, meant to be co-owned. Deliberately out of scope for now, to be
-speced together:
+## Roadmap
 
-- device-buffer ownership option (lib-allocated wired arena vs caller `dst`)
-- RDMA backend behind the same `ws_gather` surface (David D.'s ask)
-- an eviction/hot-cache policy above the resident prefix (grow-only LRU)
-- io_uring / F_NOCACHE tuning, alignment for direct IO
-- residency by a saliency map, not just a prefix (REAP-ordered rows)
+Under discussion. None are required by the current API.
 
-The resident-prefix + pread-pool split is the load-bearing decision; everything
-else layers on top.
+- Library-allocated pinned arena as an alternative to a caller-owned `dst`
+- RDMA backend behind the same `ws_gather` interface
+- An eviction policy above the resident prefix
+- io_uring, `F_NOCACHE`, and direct-IO alignment
+- Residency chosen by a saliency map rather than a prefix
+
+## License
+
+MIT.
