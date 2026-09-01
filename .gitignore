@@ -2,3 +2,5 @@
 *.a
 test_wstream
 bench_wstream
+libwstream.dylib
+libwstream.so

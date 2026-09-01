@@ -4,6 +4,20 @@ CFLAGS ?= -O2 -Wall -Wextra -std=c11 -pthread
 libwstream.a: wstream.o
 	ar rcs $@ $<
 
+# Shared library for ctypes/FFI consumers (pMLX binds this).
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+DYLIB := libwstream.dylib
+SHFLAGS := -dynamiclib -install_name @rpath/libwstream.dylib
+else
+DYLIB := libwstream.so
+SHFLAGS := -shared -fPIC
+endif
+
+dylib: $(DYLIB)
+$(DYLIB): wstream.c wstream.h
+	$(CC) $(CFLAGS) -fPIC $(SHFLAGS) wstream.c -o $@
+
 wstream.o: wstream.c wstream.h
 	$(CC) $(CFLAGS) -c wstream.c -o $@
 
@@ -22,6 +36,6 @@ install: libwstream.a wstream.h
 	install -m 644 wstream.h $(DESTDIR)$(PREFIX)/include/
 
 clean:
-	rm -f wstream.o libwstream.a test_wstream bench_wstream
+	rm -f wstream.o libwstream.a libwstream.dylib libwstream.so test_wstream bench_wstream
 
-.PHONY: test bench install clean
+.PHONY: test bench install clean dylib
