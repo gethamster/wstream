@@ -33,6 +33,43 @@ Released by **Hamster Research** — [tryhamster.com/research](https://tryhamste
 - **CI** runs the byte-exact + reentrancy test on Linux and macOS, plus
   ThreadSanitizer, ASan/UBSan, and a `-pedantic -Werror` build.
 
+## When it helps (and when it doesn't)
+
+Be clear-eyed about what this buys you.
+
+**Warm cache: roughly nothing.** If the table fits in RAM, the OS page cache
+already serves it fast. In pMLX the disk-PLE gather is ~1% of a decode step
+warm, and switching it to wstream measured neutral end-to-end (+0.6%, CI
+includes zero). Making the pool faster can't move that number, so don't reach
+for wstream expecting a warm tokens/sec win.
+
+**Cold cache / memory pressure: this is the whole point.** The moment
+model + table exceeds RAM, the page cache thrashes and every mmap lookup
+becomes a serial cold page-fault, ~5 ms each. Sixteen rows per token is
+~80 ms of stalls, several times a whole decode step, and the disk-resident
+config becomes unusable. wstream collapses those sixteen serial faults into
+one parallel round trip, and a wired `resident_rows` prefix makes the hot
+rows zero-IO even when everything else is cold.
+
+So wstream is a **capability lever, not a speed lever**: it lets you run a
+disk-resident table, a bigger model, or streamed MoE experts on hardware that
+could not otherwise hold them. Size it by the regime you actually run in,
+and measure cold (`make bench` after dropping caches) before deciding.
+
+To get the most out of it:
+
+- **Order rows hot-first.** Row access is usually Zipfian. Lay the file out so
+  the most-hit rows come first and set `resident_rows` to cover them; those
+  lookups never touch disk. This is a file-layout convention, not a feature.
+- **Batch.** One `ws_gather` of many rows amortizes better than many small
+  ones (per-row cost roughly halves from 8 to 128 rows/gather). Gather a whole
+  speculative draft tree in one call.
+- **Prefetch predictable keys.** `ws_prefetch` is a non-blocking readahead
+  hint with no pool occupancy. Use it for rows you know you'll need next step
+  instead of reading and discarding them to warm the cache.
+- **Size threads to rows/gather.** More workers than rows just adds wakeup
+  overhead; ~4 threads for a 16-row gather, re-sweep if you batch bigger.
+
 ## API
 
 ```c
