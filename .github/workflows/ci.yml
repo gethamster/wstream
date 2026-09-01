@@ -14,7 +14,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: build + byte-exact / reentrancy test
         run: make test
       - name: static lib
@@ -35,7 +35,7 @@ jobs:
       matrix:
         san: [thread, "address,undefined"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: build with -fsanitize=${{ matrix.san }}
         run: |
           clang -O1 -g -fsanitize=${{ matrix.san }} -fno-omit-frame-pointer \
@@ -47,7 +47,7 @@ jobs:
     name: strict warnings
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: -std=c11 -pedantic -Werror
         run: |
           clang -std=c11 -pedantic -Werror -Wall -Wextra -Wshadow \
