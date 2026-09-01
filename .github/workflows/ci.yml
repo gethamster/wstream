@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build + byte-exact / reentrancy test
+        run: make test
+      - name: static lib
+        run: make libwstream.a
+      - name: shared lib (FFI)
+        run: make dylib
+      - name: C++ consumer links against the C object (extern "C")
+        run: |
+          printf '#include "wstream.h"\nint main(){ return ws_open("/nonexistent",1,1,0,1) != 0; }\n' > cxx_check.cpp
+          ${CXX:-c++} -std=c++17 -I. -o cxx_check cxx_check.cpp wstream.o -pthread
+          ./cxx_check
+
+  sanitizers:
+    name: sanitizers (${{ matrix.san }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        san: [thread, "address,undefined"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build with -fsanitize=${{ matrix.san }}
+        run: |
+          clang -O1 -g -fsanitize=${{ matrix.san }} -fno-omit-frame-pointer \
+            -std=c11 -pthread -o san_test test_wstream.c wstream.c
+      - name: run
+        run: ./san_test
+
+  strict:
+    name: strict warnings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: -std=c11 -pedantic -Werror
+        run: |
+          clang -std=c11 -pedantic -Werror -Wall -Wextra -Wshadow \
+            -Wstrict-prototypes -Wmissing-prototypes -pthread -c wstream.c -o /dev/null

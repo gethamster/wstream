@@ -1,6 +1,15 @@
+/* Feature-test macro for glibc: under strict -std=c11 it hides POSIX symbols
+ * (pread, mlock, posix_fadvise, clock_gettime) unless asked. Harmless on
+ * macOS/BSD, which expose them regardless. Must precede every include. */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
+
 #include "wstream.h"
 
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,16 +45,37 @@ struct wstream {
     int shutdown;
 };
 
-/* Returns 0 on a full row, -1 on short/failed read. */
-static int read_row(struct wstream *ws, uint32_t index, void *dst) {
-    off_t off = (off_t)index * (off_t)ws->row_bytes;
+/* pread the full range, retrying on EINTR. 0 on success, -1 on short/failed. */
+static int pread_full(int fd, void *buf, size_t len, off_t off) {
     size_t got = 0;
-    while (got < ws->row_bytes) {
-        ssize_t r = pread(ws->fd, (char *)dst + got, ws->row_bytes - got, off + got);
-        if (r <= 0) return -1;
+    while (got < len) {
+        ssize_t r = pread(fd, (char *)buf + got, len - got, off + (off_t)got);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) return -1;         /* EOF before len: file shrank under us */
         got += (size_t)r;
     }
     return 0;
+}
+
+static void run_job(struct wstream *ws, job_t j) {
+    int rc = pread_full(ws->fd, j.dst, ws->row_bytes,
+                        (off_t)j.index * (off_t)ws->row_bytes);
+    pthread_mutex_lock(&j.grp->mtx);
+    if (rc != 0) j.grp->err = 1;
+    if (--j.grp->pending == 0) pthread_cond_signal(&j.grp->done);
+    pthread_mutex_unlock(&j.grp->mtx);
+}
+
+/* Pop one job under the queue lock. Caller must hold qmtx. */
+static job_t pop_locked(struct wstream *ws) {
+    job_t j = ws->q[ws->qhead];
+    ws->qhead = (ws->qhead + 1) % ws->qcap;
+    ws->qcount--;
+    pthread_cond_signal(&ws->not_full);
+    return j;
 }
 
 static void *worker(void *arg) {
@@ -58,18 +88,9 @@ static void *worker(void *arg) {
             pthread_mutex_unlock(&ws->qmtx);
             return NULL;
         }
-        job_t j = ws->q[ws->qhead];
-        ws->qhead = (ws->qhead + 1) % ws->qcap;
-        ws->qcount--;
-        pthread_cond_signal(&ws->not_full);
+        job_t j = pop_locked(ws);
         pthread_mutex_unlock(&ws->qmtx);
-
-        int rc = read_row(ws, j.index, j.dst);
-
-        pthread_mutex_lock(&j.grp->mtx);
-        if (rc != 0) j.grp->err = 1;
-        if (--j.grp->pending == 0) pthread_cond_signal(&j.grp->done);
-        pthread_mutex_unlock(&j.grp->mtx);
+        run_job(ws, j);
     }
 }
 
@@ -86,7 +107,7 @@ static void submit(struct wstream *ws, job_t j) {
 
 wstream *ws_open(const char *path, size_t row_bytes, size_t n_rows,
                  size_t resident_rows, int threads) {
-    if (!row_bytes || !n_rows) return NULL;
+    if (!path || !row_bytes || !n_rows) return NULL;
     if (n_rows > SIZE_MAX / row_bytes) return NULL;   /* file-size overflow */
 
     int fd = open(path, O_RDONLY);
@@ -95,7 +116,8 @@ wstream *ws_open(const char *path, size_t row_bytes, size_t n_rows,
     /* Reject a file too short to hold n_rows*row_bytes rather than serving
      * silent zero/partial rows later. */
     struct stat st;
-    if (fstat(fd, &st) != 0 || (uintmax_t)st.st_size < (uintmax_t)n_rows * row_bytes) {
+    if (fstat(fd, &st) != 0 || st.st_size < 0 ||
+        (uintmax_t)st.st_size < (uintmax_t)n_rows * row_bytes) {
         close(fd);
         return NULL;
     }
@@ -111,14 +133,10 @@ wstream *ws_open(const char *path, size_t row_bytes, size_t n_rows,
     ws->qcap = 8192;
 
     if (resident_rows) {
-        size_t total = resident_rows * row_bytes, got = 0;
+        size_t total = resident_rows * row_bytes;
         ws->resident_buf = malloc(total);
         if (!ws->resident_buf) goto fail;
-        while (got < total) {
-            ssize_t r = pread(fd, ws->resident_buf + got, total - got, (off_t)got);
-            if (r <= 0) goto fail;    /* truncated/failed resident load */
-            got += (size_t)r;
-        }
+        if (pread_full(fd, ws->resident_buf, total, 0) != 0) goto fail;
         mlock(ws->resident_buf, total);    /* wire it; best-effort */
     }
 
@@ -135,7 +153,7 @@ wstream *ws_open(const char *path, size_t row_bytes, size_t n_rows,
         if (pthread_create(&ws->workers[started], NULL, worker, ws) != 0)
             break;
     if (started != ws->nthreads) {
-        /* roll back the pool cleanly, then destroy sync primitives below */
+        /* roll back the pool cleanly, then destroy sync primitives */
         pthread_mutex_lock(&ws->qmtx);
         ws->shutdown = 1;
         pthread_cond_broadcast(&ws->not_empty);
@@ -161,10 +179,13 @@ fail:
 }
 
 int ws_resident(wstream *ws, uint32_t index) {
-    return index < ws->resident_rows;
+    return ws && index < ws->resident_rows;
 }
 
 int ws_gather(wstream *ws, const uint32_t *idx, size_t count, void *dst) {
+    if (!ws) return -1;
+    if (count == 0) return 0;
+    if (!idx || !dst) return -1;
     unsigned char *out = dst;
 
     /* Validate before touching disk: an out-of-range index would otherwise
@@ -203,7 +224,9 @@ int ws_gather(wstream *ws, const uint32_t *idx, size_t count, void *dst) {
 }
 
 void ws_prefetch(wstream *ws, const uint32_t *idx, size_t count) {
-#ifdef __APPLE__
+    if (!ws || !idx) return;
+#if defined(__APPLE__)
+    if (ws->row_bytes > (size_t)INT_MAX) return;   /* ra_count is an int */
     for (size_t i = 0; i < count; i++) {
         if (idx[i] < ws->n_rows && idx[i] >= ws->resident_rows) {
             struct radvisory ra;
@@ -212,8 +235,13 @@ void ws_prefetch(wstream *ws, const uint32_t *idx, size_t count) {
             fcntl(ws->fd, F_RDADVISE, &ra);
         }
     }
+#elif defined(POSIX_FADV_WILLNEED)
+    for (size_t i = 0; i < count; i++)
+        if (idx[i] < ws->n_rows && idx[i] >= ws->resident_rows)
+            posix_fadvise(ws->fd, (off_t)idx[i] * (off_t)ws->row_bytes,
+                          (off_t)ws->row_bytes, POSIX_FADV_WILLNEED);
 #else
-    (void)ws; (void)idx; (void)count;
+    (void)count;
 #endif
 }
 

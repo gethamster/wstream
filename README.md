@@ -1,5 +1,7 @@
 # wstream
 
+[![ci](https://github.com/gethamster/wstream/actions/workflows/ci.yml/badge.svg)](https://github.com/gethamster/wstream/actions/workflows/ci.yml)
+
 A tiny, engine-agnostic C library for NVMe→memory weight residency streaming.
 The reusable primitive under "stream experts / n-gram tables off SSD" — pulled
 out so any engine (pMLX, mlx-serve, …) links the same thing instead of each
@@ -9,7 +11,8 @@ Released by **Hamster Research** — [tryhamster.com/research](https://tryhamste
 
 ## What it is (and isn't)
 
-- Plain C, POSIX (Linux + macOS). No MLX, no Python, no C++. ~220 LOC.
+- Plain C11, POSIX (Linux + macOS). No MLX, no Python, no dependencies. Under
+  300 lines. `extern "C"` guarded, so C++ engines link it directly.
 - A file is `n_rows` fixed-size rows. The first `resident_rows` are read once and
   wired (`mlock`); the rest stream on demand through a `pread` thread-pool.
 - **pread pool, not mmap page-faults** — on a cold cache the mmap fault path
@@ -25,14 +28,17 @@ Released by **Hamster Research** — [tryhamster.com/research](https://tryhamste
   one `wstream`. (`ws_close` must not race a live gather.)
 - **Fails loud.** `ws_open` rejects a file shorter than `n_rows*row_bytes` or a
   failed resident load; `ws_gather` returns `-1` on an out-of-range index or a
-  short read instead of handing back a silent zero/partial row.
+  short read instead of handing back a silent zero/partial row. Reads retry on
+  `EINTR`, so a signal in the host process never fails a gather.
+- **CI** runs the byte-exact + reentrancy test on Linux and macOS, plus
+  ThreadSanitizer, ASan/UBSan, and a `-pedantic -Werror` build.
 
 ## API
 
 ```c
 wstream *ws_open(path, row_bytes, n_rows, resident_rows, threads);  // NULL on error
 int      ws_gather(ws, indices, count, dst);   // 0 ok, -1 bad index / short read
-void     ws_prefetch(ws, indices, count);      // F_RDADVISE hint, non-blocking
+void     ws_prefetch(ws, indices, count);      // readahead hint (F_RDADVISE / fadvise)
 int      ws_resident(ws, index);               // zero-IO row?
 void     ws_close(ws);
 ```

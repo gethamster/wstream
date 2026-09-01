@@ -12,6 +12,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define WSTREAM_VERSION_MAJOR 0
 #define WSTREAM_VERSION_MINOR 1
 #define WSTREAM_VERSION_PATCH 0
@@ -34,21 +38,27 @@ wstream *ws_open(const char *path, size_t row_bytes, size_t n_rows,
  * Resident rows are copied from the wired prefix; non-resident rows are pread
  * in parallel across the pool. Blocks until all rows are in `dst`.
  *
- * Returns 0 on success, -1 if any index is out of range (>= n_rows) or any
- * row read failed short — on -1 the contents of `dst` are undefined.
+ * Returns 0 on success, -1 if any index is out of range (>= n_rows), any
+ * argument is NULL, or any row read failed short — on -1 the contents of `dst`
+ * are undefined. Reads retry transparently on EINTR. count==0 is a no-op.
  *
  * Reentrant: concurrent ws_gather calls on the SAME handle are safe (each call
  * carries its own completion latch). ws_close must not race a live gather. */
 int ws_gather(wstream *ws, const uint32_t *indices, size_t count, void *dst);
 
 /* Best-effort: hint the OS to read these non-resident rows ahead (F_RDADVISE on
- * macOS; no-op elsewhere). Non-blocking. Use for predictable keys (e.g. the
- * n-gram table). */
+ * macOS, posix_fadvise WILLNEED on Linux; no-op elsewhere). Non-blocking. Use
+ * for predictable keys (e.g. the n-gram table). Out-of-range indices are
+ * skipped. */
 void ws_prefetch(wstream *ws, const uint32_t *indices, size_t count);
 
 /* 1 if the row is in the wired resident prefix (a gather of it does zero IO). */
 int ws_resident(wstream *ws, uint32_t index);
 
 void ws_close(wstream *ws);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

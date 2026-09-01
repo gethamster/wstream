@@ -13,6 +13,9 @@
  *   Linux:  sync && echo 3 | sudo tee /proc/sys/vm/drop_caches
  * The bench prints which regime it thinks it's in.
  */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
 #include "wstream.h"
 
 #include <fcntl.h>

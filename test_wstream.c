@@ -2,6 +2,9 @@
  *   1. a mixed resident+streamed gather is byte-exact,
  *   2. an out-of-range index is rejected (ws_gather returns -1),
  *   3. concurrent gathers on one handle stay byte-exact (reentrancy). */
+#ifndef _DEFAULT_SOURCE
+#define _DEFAULT_SOURCE 1
+#endif
 #include "wstream.h"
 
 #include <fcntl.h>
